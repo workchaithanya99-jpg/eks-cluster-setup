@@ -1,0 +1,75 @@
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: eks-test
+  namespace: monitoring
+spec:
+  configuration:
+    users:
+      admin/password: "yourStrongPassword"
+      admin/networks/ip:
+        - "0.0.0.0/0"
+      admin/profile: "admin_profile"
+    files:
+      config.d/zz-allow-feature-tier.xml: |
+        <clickhouse>
+          <allow_feature_tier>0</allow_feature_tier>
+        </clickhouse>
+      config.d/zz-prometheus-handler.xml: |
+        <clickhouse>
+          <http_handlers>
+            <rule>
+              <url_prefix>/prometheus/api/v1</url_prefix>
+              <handler><type>prometheus_api_v1</type></handler>
+            </rule>
+            <defaults/>
+          </http_handlers>
+        </clickhouse>
+      users.d/zz-admin-profile.xml: |
+        <clickhouse>
+          <profiles>
+            <admin_profile>
+              <enable_time_series_table>1</enable_time_series_table>
+            </admin_profile>
+          </profiles>
+        </clickhouse>
+    clusters:
+      - name: cluster
+        layout:
+          shardsCount: 1
+          replicasCount: 1
+        templates:
+          clusterServiceTemplate: clickhouse-lb-template
+          podTemplate: clickhouse-persistent-pod
+  templates:
+    podTemplates:
+      - name: clickhouse-persistent-pod
+        spec:
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:26.9
+              volumeMounts:
+                - name: clickhouse-storage
+                  mountPath: /var/lib/clickhouse
+    volumeClaimTemplates:
+      - name: clickhouse-storage
+        reclaimPolicy: Retain
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: gp2
+          resources:
+            requests:
+              storage: 20Gi
+    serviceTemplates:
+      - name: clickhouse-lb-template
+        generateName: "clickhouse-{chi}-lb"
+        spec:
+          type: LoadBalancer
+          ports:
+            - name: http
+              port: 8123
+              targetPort: 8123
+            - name: tcp
+              port: 9000
+              targetPort: 9000
