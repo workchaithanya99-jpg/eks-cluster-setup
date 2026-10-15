@@ -1,3 +1,4 @@
+cat clickhouse-installation.yaml
 apiVersion: clickhouse.altinity.com/v1
 kind: ClickHouseInstallation
 metadata:
@@ -5,11 +6,6 @@ metadata:
   namespace: monitoring
 spec:
   configuration:
-    users:
-      admin/password: "yourStrongPassword"
-      admin/networks/ip:
-        - "0.0.0.0/0"
-      admin/profile: "admin_profile"
     files:
       config.d/zz-allow-feature-tier.xml: |
         <clickhouse>
@@ -20,10 +16,27 @@ spec:
           <http_handlers>
             <rule>
               <url_prefix>/prometheus/api/v1</url_prefix>
-              <handler><type>prometheus_api_v1</type></handler>
+              <handler>
+                <type>prometheus_api_v1</type>
+              </handler>
             </rule>
             <defaults/>
           </http_handlers>
+        </clickhouse>
+      users.d/admin.xml: |
+        <clickhouse>
+          <users>
+            <admin>
+              <password_sha256_hex>eda15ce4834ac303532bc6973df5ff8a5deb75d7dfceb9fc2cdf1bb450a01cf5</password_sha256_hex>
+              <networks>
+                <ip>0.0.0.0/0</ip>
+                <ip>::/0</ip>
+              </networks>
+              <profile>default</profile>
+              <quota>default</quota>
+              <access_management>1</access_management>
+            </admin>
+          </users>
         </clickhouse>
       users.d/zz-admin-profile.xml: |
         <clickhouse>
