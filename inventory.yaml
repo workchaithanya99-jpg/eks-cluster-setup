@@ -1,0 +1,203 @@
+serviceAccount:
+  name: fluent-bit
+rbac:
+  create: true
+  eventsAccess: true
+env:
+  - name: CH_USER
+    value: admin
+  - name: CH_PASSWORD
+    valueFrom: {secretKeyRef: {name: clickhouse-credentials, key: ingest_password}}
+tolerations:
+  - operator: Exists
+config:
+  service: |
+    [SERVICE]
+        Flush         5
+        Daemon        Off
+        Log_Level     info
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+        storage.path  /var/log/flb-storage/
+        storage.sync  normal
+        storage.backlog.mem_limit 50M
+  inputs: |
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*.log
+        Exclude_Path      /var/log/containers/chi-*_monitoring_*.log,/var/log/containers/fluent-bit-*_monitoring_*.log
+        multiline.parser  docker, cri
+        Tag               kube.*
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+        storage.type      filesystem
+    [INPUT]
+        Name              kubernetes_events
+        Tag               k8s_events
+        Kube_URL          https://kubernetes.default.svc
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+        interval_sec      30
+        db                /var/log/flb_k8s_events.db
+  filters: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude Off
+        Labels              Off
+        Annotations         Off
+    [FILTER]
+        Name         nest
+        Match        kube.*
+        Operation    lift
+        Nested_under kubernetes
+        Add_prefix   k8s_
+    [FILTER]
+        Name    modify
+        Match   kube.*
+        Rename  log                 message
+        Rename  k8s_container_name  container
+        Rename  k8s_pod_name        pod_name
+        Rename  k8s_namespace_name  namespace
+        Rename  k8s_host            node
+    [FILTER]
+        Name         nest
+        Match        k8s_events
+        Operation    lift
+        Nested_under involvedObject
+        Add_prefix   involved_
+    [FILTER]
+        Name    modify
+        Match   k8s_events
+        Rename  involved_name        pod_name
+        Rename  involved_namespace   namespace
+        Rename  involved_kind        object_kind
+        Rename  type                 event_type
+  outputs: |
+    [OUTPUT]
+        Name                          s3
+        Match                         kube.*
+        bucket                        logs-store-bucket-555552813318-us-east-1-an
+        region                        us-east-1
+        total_file_size               10M
+        upload_timeout                1m
+        s3_key_format                 /pod-logs/year=%Y/month=%m/day=%d/hour=%H/minute=%M/pod-logs-$UUID.gz
+        s3_key_format_tag_delimiters  .
+        store_dir_limit_size          5G
+        use_put_object                On
+        compression                   gzip
+        json_date_key                 timestamp
+        json_date_format              iso8601
+        Retry_Limit                   5
+    [OUTPUT]
+        Name                          s3
+        Match                         k8s_events
+        bucket                        logs-store-bucket-555552813318-us-east-1-an
+        region                        us-east-1
+        total_file_size               10M
+        upload_timeout                1m
+        s3_key_format                 /k8s-events/year=%Y/month=%m/day=%d/hour=%H/minute=%M/events-$UUID.json.gz
+        s3_key_format_tag_delimiters  .
+        store_dir_limit_size          2G
+        use_put_object                On
+        compression                   gzip
+        json_date_key                 timestamp
+        json_date_format              iso8601
+        Retry_Limit                   5
+    [OUTPUT]
+        Name             http
+        Match            kube.*
+        Host             chi-eks-test-cluster-0-0.monitoring.svc.cluster.local
+        Port             8123
+        URI              /?query=INSERT%20INTO%20observability.logs%20FORMAT%20JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort
+        Format           json
+        HTTP_User        ${CH_USER}
+        HTTP_Passwd      ${CH_PASSWORD}
+        json_date_key    timestamp
+        json_date_format iso8601
+        tls              Off
+        Retry_Limit      5
+    [OUTPUT]
+        Name             http
+        Match            k8s_events
+        Host             chi-eks-test-cluster-0-0.monitoring.svc.cluster.local
+        Port             8123
+        URI              /?query=INSERT%20INTO%20observability.k8s_events%20FORMAT%20JSONEachRow&input_format_skip_unknown_fields=1&date_time_input_format=best_effort
+        Format           json
+        HTTP_User        ${CH_USER}
+        HTTP_Passwd      ${CH_PASSWORD}
+        json_date_key    timestamp
+        json_date_format iso8601
+        tls              Off
+        Retry_Limit      5
+root@ip-172-31-30-179:~/eks-obs# ls
+__pycache__  collector.py  env.sh  fluent-bit-values.yaml  inventory.yaml  schema.sql
+root@ip-172-31-30-179:~/eks-obs# cat  inventory.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: k8s-inventory-collector, namespace: monitoring}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: k8s-inventory-collector}
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: k8s-inventory-collector}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: k8s-inventory-collector}
+subjects:
+  - {kind: ServiceAccount, name: k8s-inventory-collector, namespace: monitoring}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-inventory-collector
+  namespace: monitoring
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: k8s-inventory-collector}}
+  template:
+    metadata: {labels: {app: k8s-inventory-collector}}
+    spec:
+      serviceAccountName: k8s-inventory-collector
+      tolerations: [{operator: Exists}]
+      securityContext: {runAsNonRoot: true, runAsUser: 65534}
+      containers:
+        - name: collector
+          image: python:3.12-slim
+          command: ["python", "-u", "/app/collector.py"]
+          env:
+            - {name: CH_URL, value: "http://chi-eks-test-cluster-0-0.monitoring.svc.cluster.local:8123"}
+            - {name: CH_USER, value: admin}
+            - name: CH_PASSWORD
+              valueFrom: {secretKeyRef: {name: clickhouse-credentials, key: ingest_password}}
+            - {name: PROM_URL, value: "http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090"}
+            - {name: INTERVAL_SECONDS, value: "60"}
+            - {name: DEDICATED_LABEL_KEYS, value: "dedicated,workload-type"}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          volumeMounts: [{name: script, mountPath: /app}]
+      volumes:
+        - name: script
+          configMap: {name: k8s-inventory-script}
